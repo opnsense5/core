@@ -86,6 +86,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     } elseif (isset($_GET['id']) && isset($a_filter[$_GET['id']])) {
         $id = $_GET['id'];
         $configId = $id;
+    } elseif (isset($_GET['get_address_options'])) {
+        /* XXX: no beauty contest here, we need the same valid options as MVC, just dump them... */
+        echo json_encode((new OPNsense\Firewall\Api\FilterController())->listNetworkSelectOptionsAction());
+        exit(0);
     }
 
     // define form fields
@@ -149,12 +153,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         $pconfig['category'] = !empty($pconfig['category']) ? explode(",", $pconfig['category']) : [];
 
         // process fields with some kind of logic
-        address_to_pconfig($a_filter[$configId]['source'], $pconfig['src'],
-          $pconfig['srcmask'], $pconfig['srcnot'],
-          $pconfig['srcbeginport'], $pconfig['srcendport']);
-        address_to_pconfig($a_filter[$configId]['destination'], $pconfig['dst'],
-          $pconfig['dstmask'], $pconfig['dstnot'],
-          $pconfig['dstbeginport'], $pconfig['dstendport']);
+        address_to_pconfig(
+          $a_filter[$configId]['source'],
+          $pconfig['src'],
+          $ignore, /* XXX: ignored */
+          $pconfig['srcnot'],
+          $pconfig['srcbeginport'],
+          $pconfig['srcendport'],
+          true
+        );
+
+        address_to_pconfig(
+          $a_filter[$configId]['destination'],
+          $pconfig['dst'],
+          $ignore,  /* XXX: ignored */
+          $pconfig['dstnot'],
+          $pconfig['dstbeginport'],
+          $pconfig['dstendport'],
+          true
+        );
+
         if (isset($id) && isset($a_filter[$configId]['associated-rule-id'])) {
             // do not link on rule copy.
             $pconfig['associated-rule-id'] = $a_filter[$configId]['associated-rule-id'];
@@ -169,8 +187,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
                 $pconfig['interface'] = $_GET['if'];
             }
         }
-        $pconfig['src'] = "any";
-        $pconfig['dst'] = "any";
+        $pconfig['src'] = ["any"];
+        $pconfig['dst'] = ["any"];
     }
 
     // initialize empty fields
@@ -652,6 +670,50 @@ include("head.inc");
           $(".advanced_opt_src").toggleClass("hidden visible");
       });
 
+      $.ajax("/firewall_rules_edit.php?get_address_options",{
+          type: 'get',
+          cache: false,
+          dataType: "json",
+          success: function(data) {
+            $(".net_selector_multi").each(function(){
+                /* replaceInputWithSelector() replaces our input with a clean one, copy relevant attributes after construct */
+                $(this).replaceInputWithSelector(data, true);
+                let new_input = $("#" + $(this).attr('id'));
+                new_input.attr('name', $(this).attr('id'));
+                if ($(this).is(':disabled')) {
+                    $("select[for='" + $(this).attr('id') + "']").prop('disabled', true);
+                    new_input.prop('disabled', true);
+                }
+                $("select[for='" + $(this).attr('id') + "']").on('shown.bs.select', function(){
+                    $(this).data('previousValue', $(this).val());
+                }).change(function(){
+                    let prev = Array.isArray($(this).data('previousValue')) ? $(this).data('previousValue') : [];
+                    let is_single = $(this).val().includes('') || $(this).val().includes('any');
+                    let was_single = prev.includes('') || prev.includes('any');
+                    let refresh = false;
+                    if (was_single && is_single && $(this).val().length > 1) {
+                        $(this).val($(this).val().filter(value => !prev.includes(value)));
+                        refresh = true;
+                    } else if (is_single && $(this).val().length > 1) {
+                        if ($(this).val().includes('any') && !prev.includes('any')) {
+                            $(this).val('any');
+                        } else{
+                            $(this).val('');
+                        }
+                        refresh = true;
+                    }
+                    if (refresh) {
+                        $(this).selectpicker('refresh');
+                        $(this).trigger('change');
+                    }
+                    $(this).data('previousValue', $(this).val());
+                });
+                new_input.val($(this).val()).change();
+            });
+          }
+      });
+
+
       // select / input combination, link behaviour
       // when the data attribute "data-other" is selected, display related input item(s)
       // push changes from input back to selected option value
@@ -689,7 +751,7 @@ include("head.inc");
               if ($(this).attr("name") == undefined) {
                 $(this).change(function(){
                     var otherOpt = $('#'+$(this).attr('for')+' > option[data-other="true"]') ;
-                    otherOpt.attr("value",$(this).val());
+                    otherOpt.attr("value", $(this).val());
                 });
               }
           }
@@ -1064,51 +1126,8 @@ include("head.inc");
                   <tr>
                       <td><i class="fa fa-info-circle text-muted"></i> <?=gettext("Source"); ?></td>
                       <td>
-                        <table style="max-width: 348px">
-                          <tr>
-                            <td>
-                              <select <?=!empty($pconfig['associated-rule-id']) ? "disabled" : "";?> name="src" id="src" class="selectpicker" data-live-search="true" data-size="5" data-width="348px">
-                                <option data-other=true value="<?=$pconfig['src'];?>" <?=!is_specialnet($pconfig['src']) ? "selected=\"selected\"" : "";?>><?=gettext("Single host or Network"); ?></option>
-                                <optgroup label="<?=gettext("Aliases");?>">
-  <?php                        foreach (legacy_list_aliases("network") as $alias):
-  ?>
-                                  <option value="<?=$alias['name'];?>" <?=$alias['name'] == $pconfig['src'] ? "selected=\"selected\"" : "";?>><?=htmlspecialchars($alias['name']);?></option>
-  <?php                          endforeach; ?>
-                                </optgroup>
-                                <optgroup label="<?=gettext("Networks");?>">
-  <?php                          foreach (get_specialnets(true) as $ifent => $ifdesc):
-  ?>
-                                  <option value="<?=$ifent;?>" <?= $pconfig['src'] == $ifent ? "selected=\"selected\"" : ""; ?>><?=$ifdesc;?></option>
-  <?php                            endforeach; ?>
-                              </optgroup>
-                            </select>
-                          </td>
-                        </tr>
-                        <tr>
-                          <td>
-                            <div>
-                              <table style="max-width: 348px">
-                                <tbody>
-                                  <tr>
-                                      <td style="width:285px">
-                                        <!-- updates to "other" option in  src -->
-                                        <input <?=!empty($pconfig['associated-rule-id']) ? "disabled" : "";?>  type="text" id="src_address" for="src" value="<?=$pconfig['src'];?>" aria-label="<?=gettext("Source address");?>"/>
-                                      </td>
-                                      <td>
-                                        <select <?=!empty($pconfig['associated-rule-id']) ? "disabled" : "";?> name="srcmask" data-network-id="src_address" class="selectpicker ipv4v6net" data-size="5" id="srcmask" data-width="70px" for="src">
-<?php for ($i = 128; $i > 0; $i--): ?>
-                                          <option value="<?=$i;?>" <?= $i == $pconfig['srcmask'] ? "selected=\"selected\"" : ""; ?>><?=$i;?></option>
-<?php endfor ?>
-                                        </select>
-                                      </td>
-                                  </tr>
-                                </tbody>
-                              </table>
-                          </div>
-                          </td>
-                        </tr>
-                      </table>
-                    </td>
+                        <input <?=!empty($pconfig['associated-rule-id']) ? "disabled" : "";?> id="src" name="src" class="net_selector_multi" type="text" value="<?=$pconfig['src'];?>" />
+                      </td>
                   </tr>
                   <tr class="advanced_opt_src visible">
                     <td><?=gettext("Source"); ?></td>
@@ -1192,48 +1211,7 @@ include("head.inc");
                   <tr>
                     <td><i class="fa fa-info-circle text-muted"></i> <?=gettext("Destination"); ?></td>
                     <td>
-                      <table style="max-width: 348px">
-                        <tr>
-                          <td>
-                            <select <?=!empty($pconfig['associated-rule-id']) ? "disabled" : "";?> name="dst" id="dst" class="selectpicker" data-live-search="true" data-size="5" data-width="348px">
-                              <option data-other=true value="<?=$pconfig['dst'];?>" <?=!is_specialnet($pconfig['dst']) ? "selected=\"selected\"" : "";?>><?=gettext("Single host or Network"); ?></option>
-                              <optgroup label="<?=gettext("Aliases");?>">
-  <?php                        foreach (legacy_list_aliases("network") as $alias):
-  ?>
-                                <option value="<?=$alias['name'];?>" <?=$alias['name'] == $pconfig['dst'] ? "selected=\"selected\"" : "";?>><?=htmlspecialchars($alias['name']);?></option>
-  <?php                          endforeach; ?>
-                              </optgroup>
-                              <optgroup label="<?=gettext("Networks");?>">
-  <?php                          foreach (get_specialnets(true) as $ifent => $ifdesc):
-  ?>
-                                <option value="<?=$ifent;?>" <?= $pconfig['dst'] == $ifent ? "selected=\"selected\"" : ""; ?>><?=$ifdesc;?></option>
-  <?php                            endforeach; ?>
-                              </optgroup>
-                            </select>
-                          </td>
-                        </tr>
-                        <tr>
-                          <td>
-                            <table style="max-width: 348px">
-                              <tbody>
-                                <tr>
-                                    <td style="width:285px">
-                                      <!-- updates to "other" option in  src -->
-                                      <input <?=!empty($pconfig['associated-rule-id']) ? "disabled" : "";?>  type="text" id="dst_address" for="dst" value="<?=$pconfig['dst'];?>" aria-label="<?=gettext("Destination address");?>"/>
-                                    </td>
-                                    <td>
-                                      <select <?=!empty($pconfig['associated-rule-id']) ? "disabled" : "";?> name="dstmask" class="selectpicker ipv4v6net" data-network-id="dst_address" data-size="5" id="dstmask" data-width="70px" for="dst">
-<?php for ($i = 128; $i > 0; $i--): ?>
-                                        <option value="<?=$i;?>" <?= $i == $pconfig['dstmask'] ? "selected=\"selected\"" : ""; ?>><?=$i;?></option>
-<?php endfor; ?>
-                                      </select>
-                                    </td>
-                                </tr>
-                              </tbody>
-                            </table>
-                          </td>
-                        </tr>
-                      </table>
+                      <input <?=!empty($pconfig['associated-rule-id']) ? "disabled" : "";?> id="dst" name="dst" type="text" value="<?=$pconfig['src'];?>"  class="net_selector_multi"  />
                     </td>
                   </tr>
                   <tr>
